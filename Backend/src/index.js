@@ -14,7 +14,7 @@ const app = express()
 app.use(helmet())
 app.use(
   cors({
-    origin: "https://interview-ready-iota.vercel.app/",
+    origin: "https://interview-ready-iota.vercel.app",
     credentials: true,
   })
 )
