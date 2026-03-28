@@ -1,10 +1,43 @@
 import asyncHandler from "express-async-handler"
 import Interview from "../models/interview.model.js"
 import ApiResponse from "../utils/ApiResponse.js"
-import chatSession from "../utils/geminiai.js"
+import createChatSession from "../utils/geminiai.js"
 import Feedback from "../models/feedback.model.js"
 import ApiError from "../utils/ApiError.js"
 import User from "../models/user.model.js"
+
+const extractJSONArray = (value) => {
+  if (typeof value !== "string") return null
+
+  const cleaned = value.trim().replace(/^```json\s*/i, "").replace(/```$/i, "")
+  const startIndex = cleaned.indexOf("[")
+  const endIndex = cleaned.lastIndexOf("]")
+
+  if (startIndex === -1 || endIndex === -1 || endIndex <= startIndex) {
+    return null
+  }
+
+  return cleaned.slice(startIndex, endIndex + 1)
+}
+
+const parseQuestions = (rawText) => {
+  const payload = extractJSONArray(rawText)
+  if (!payload) return null
+
+  const parsed = JSON.parse(payload)
+  if (!Array.isArray(parsed)) return null
+
+  return parsed
+    .filter(
+      (item) =>
+        item && typeof item.question === "string" && typeof item.answer === "string"
+    )
+    .map((item) => ({
+      question: item.question.trim(),
+      answer: item.answer.trim(),
+    }))
+    .filter((item) => item.question && item.answer)
+}
 
 /**
  * @function createInterview
@@ -18,10 +51,17 @@ const createInterview = asyncHandler(async (req, res) => {
     req.body
   const userId = req.user?._id
 
+  if (!process.env.GEMINI_API_KEY) {
+    throw new ApiError(500, "Server configuration error")
+  }
+
   // *Check if user has enough credits
   const creditsLeft = await User.findById(userId).select(
     "credits maxNoOfQuestions"
   )
+  if (!creditsLeft) {
+    throw new ApiError(404, "User not found")
+  }
   if (creditsLeft?.credits < 1) {
     throw new ApiError(400, "You don't have enough credits")
   }
@@ -49,12 +89,26 @@ const createInterview = asyncHandler(async (req, res) => {
     The questions should be related to ${jobRole} with appropriate difficulty based on the provided years of experience and difficulty level.
 `
 
-  const result = await chatSession.sendMessage(prompt)
-  const cleanResult = result.response.candidates[0].content.parts[0].text
-    .replace("```json\n", "")
-    .replace("\n```", "")
-  console.log(cleanResult)
-  const questionsAndAnswers = JSON.parse(cleanResult)
+  let questionsAndAnswers = null
+
+  try {
+    const chatSession = createChatSession()
+    const result = await chatSession.sendMessage(prompt)
+    const responseText = result?.response?.text?.() || ""
+    questionsAndAnswers = parseQuestions(responseText)
+  } catch (error) {
+    throw new ApiError(
+      502,
+      "Unable to generate interview questions at the moment. Please try again."
+    )
+  }
+
+  if (!questionsAndAnswers || questionsAndAnswers.length === 0) {
+    throw new ApiError(
+      502,
+      "Unable to generate interview questions at the moment. Please try again."
+    )
+  }
 
   // *Create interview
   const interview = await Interview.create({

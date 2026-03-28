@@ -8,6 +8,14 @@ import ApiError from "../utils/ApiError.js"
 const errorHandler = (error, req, res, next) => {
   const isDevelopment = process.env.NODE_ENV === "development"
 
+  console.error("API Error:", {
+    method: req.method,
+    path: req.originalUrl,
+    userId: req.user?._id,
+    message: error?.message,
+    stack: error?.stack,
+  })
+
   if (error instanceof ApiError) {
     return res
       .status(error.statusCode)

@@ -30,9 +30,10 @@ const safetySettings = [
 ]
 
 // *Create a chat session
-const chatSession = model.startChat({
-  safetySettings,
-  generationConfig,
-})
+const createChatSession = () =>
+  model.startChat({
+    safetySettings,
+    generationConfig,
+  })
 
-export default chatSession
+export default createChatSession

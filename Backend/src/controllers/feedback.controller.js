@@ -1,8 +1,31 @@
 import asyncHandler from "express-async-handler"
 import Feedback from "../models/feedback.model.js"
 import ApiResponse from "../utils/ApiResponse.js"
-import chatSession from "../utils/geminiai.js"
+import createChatSession from "../utils/geminiai.js"
 import ApiError from "../utils/ApiError.js"
+
+const parseFeedback = (rawText) => {
+  if (typeof rawText !== "string") return null
+
+  const cleaned = rawText.trim().replace(/^```json\s*/i, "").replace(/```$/i, "")
+  const startIndex = cleaned.indexOf("{")
+  const endIndex = cleaned.lastIndexOf("}")
+
+  if (startIndex === -1 || endIndex === -1 || endIndex <= startIndex) {
+    return null
+  }
+
+  const parsed = JSON.parse(cleaned.slice(startIndex, endIndex + 1))
+  if (typeof parsed?.feedback !== "string") return null
+
+  const rating = Number(parsed?.rating)
+  if (Number.isNaN(rating) || rating < 0 || rating > 5) return null
+
+  return {
+    rating,
+    feedback: parsed.feedback.trim(),
+  }
+}
 
 /**
  * @function createFeedback
@@ -26,11 +49,17 @@ const createFeedback = asyncHandler(async (req, res) => {
     Make sure the rating is a number between 0 and 5, and the feedback is clear and actionable.
   `
 
+  const chatSession = createChatSession()
   const result = await chatSession.sendMessage(prompt)
-  const cleanResult = result.response.candidates[0].content.parts[0].text
-    .replace("```json\n", "")
-    .replace("\n```", "")
-  const feedback = JSON.parse(cleanResult)
+  const responseText = result?.response?.text?.() || ""
+  const feedback = parseFeedback(responseText)
+
+  if (!feedback) {
+    throw new ApiError(
+      502,
+      "Unable to generate feedback at the moment. Please try again."
+    )
+  }
 
   // *Check if feedback already exists
   const feedbackExists = await Feedback.findOne({
