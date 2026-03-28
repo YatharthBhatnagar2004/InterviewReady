@@ -20,14 +20,10 @@ const extractJSONArray = (value) => {
   return cleaned.slice(startIndex, endIndex + 1)
 }
 
-const parseQuestions = (rawText) => {
-  const payload = extractJSONArray(rawText)
-  if (!payload) return null
+const normalizeQuestions = (items) => {
+  if (!Array.isArray(items)) return []
 
-  const parsed = JSON.parse(payload)
-  if (!Array.isArray(parsed)) return null
-
-  return parsed
+  return items
     .filter(
       (item) =>
         item && typeof item.question === "string" && typeof item.answer === "string"
@@ -37,6 +33,128 @@ const parseQuestions = (rawText) => {
       answer: item.answer.trim(),
     }))
     .filter((item) => item.question && item.answer)
+}
+
+const parseQuestions = (rawText) => {
+  if (typeof rawText !== "string") return null
+
+  const cleaned = rawText.trim().replace(/^```json\s*/i, "").replace(/```$/i, "")
+
+  try {
+    const directParsed = JSON.parse(cleaned)
+    if (Array.isArray(directParsed)) {
+      return normalizeQuestions(directParsed)
+    }
+    if (Array.isArray(directParsed?.questions)) {
+      return normalizeQuestions(directParsed.questions)
+    }
+  } catch {
+    // Ignore parse errors and try extracting JSON array from mixed text.
+  }
+
+  const payload = extractJSONArray(cleaned)
+  if (!payload) return null
+
+  try {
+    const parsed = JSON.parse(payload)
+    return normalizeQuestions(parsed)
+  } catch {
+    return null
+  }
+}
+
+const buildFallbackQuestions = ({
+  jobRole,
+  jobDescription,
+  jobExperience,
+  noOfQuestions,
+  difficulty,
+}) => {
+  const role = jobRole || "this role"
+  const experience = Number(jobExperience)
+  const years = Number.isNaN(experience) ? 0 : experience
+  const level = (difficulty || "easy").toLowerCase()
+  const count = Math.max(1, Number(noOfQuestions) || 5)
+  const focus = (jobDescription || "core responsibilities").slice(0, 80)
+
+  const bank = [
+    {
+      question: `Can you walk me through your recent experience as a ${role}?`,
+      answer:
+        "Start with scope, team size, business context, and two measurable outcomes that you personally influenced.",
+    },
+    {
+      question: `How would you break down a ${role} problem statement before implementation?`,
+      answer:
+        "Clarify requirements, constraints, and success metrics; propose architecture options; estimate effort; then execute in milestones.",
+    },
+    {
+      question: `What trade-offs do you consider when designing solutions for ${focus}?`,
+      answer:
+        "Compare performance, scalability, reliability, maintainability, and cost, then justify decisions with expected impact.",
+    },
+    {
+      question: `How do you ensure quality and reduce regressions in your work?`,
+      answer:
+        "Use layered testing, code reviews, observability, rollback plans, and post-release monitoring tied to clear SLIs/SLOs.",
+    },
+    {
+      question: `Describe a difficult bug you resolved and your debugging process.`,
+      answer:
+        "Reproduce reliably, isolate variables, inspect logs/metrics, form hypotheses, validate with small experiments, and document the fix.",
+    },
+    {
+      question: `How do you communicate technical decisions with product and non-technical stakeholders?`,
+      answer:
+        "Translate options into risks, timeline, and user impact; align on priorities; and keep updates concise and frequent.",
+    },
+    {
+      question: `What is your approach to performance optimization in a ${role} context?`,
+      answer:
+        "Measure first, identify bottlenecks, optimize highest-impact paths, and validate improvements with baseline comparisons.",
+    },
+    {
+      question: `How do you handle security and privacy concerns in your projects?`,
+      answer:
+        "Apply secure defaults, least privilege, input validation, dependency scanning, and regular threat-model reviews.",
+    },
+    {
+      question: `Tell me about a time you had to deliver under tight deadlines.`,
+      answer:
+        "Prioritize ruthlessly, reduce scope to essentials, communicate trade-offs early, and protect quality for critical paths.",
+    },
+    {
+      question: `How would you mentor someone junior in your team for this role?`,
+      answer:
+        "Set clear expectations, pair on real tasks, provide actionable feedback, and gradually increase ownership.",
+    },
+  ]
+
+  const adjustedBank = bank.map((item) => {
+    if (level === "hard") {
+      return {
+        question: `${item.question} Also discuss edge cases and system-level impact.`,
+        answer: `${item.answer} Include failure modes, scalability considerations, and rollback strategy.`,
+      }
+    }
+
+    if (level === "medium") {
+      return {
+        question: `${item.question} Include practical implementation details.`,
+        answer: `${item.answer} Cover design choices and why one approach was selected over others.`,
+      }
+    }
+
+    return item
+  })
+
+  return Array.from({ length: count }, (_, index) => {
+    const template = adjustedBank[index % adjustedBank.length]
+    return {
+      question: `${template.question} (Experience context: ${years} year(s))`,
+      answer: template.answer,
+    }
+  })
 }
 
 /**
@@ -50,10 +168,6 @@ const createInterview = asyncHandler(async (req, res) => {
   const { jobRole, jobDescription, jobExperience, noOfQuestions, difficulty } =
     req.body
   const userId = req.user?._id
-
-  if (!process.env.GEMINI_API_KEY) {
-    throw new ApiError(500, "Server configuration error")
-  }
 
   // *Check if user has enough credits
   const creditsLeft = await User.findById(userId).select(
@@ -91,23 +205,27 @@ const createInterview = asyncHandler(async (req, res) => {
 
   let questionsAndAnswers = null
 
-  try {
-    const chatSession = createChatSession()
-    const result = await chatSession.sendMessage(prompt)
-    const responseText = result?.response?.text?.() || ""
-    questionsAndAnswers = parseQuestions(responseText)
-  } catch (error) {
-    throw new ApiError(
-      502,
-      "Unable to generate interview questions at the moment. Please try again."
-    )
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const chatSession = createChatSession()
+      const result = await chatSession.sendMessage(prompt)
+      const responseText = result?.response?.text?.() || ""
+      questionsAndAnswers = parseQuestions(responseText)
+    } catch (error) {
+      console.error("Gemini interview generation failed:", error?.message)
+    }
+  } else {
+    console.error("Gemini key missing. Falling back to local interview questions.")
   }
 
   if (!questionsAndAnswers || questionsAndAnswers.length === 0) {
-    throw new ApiError(
-      502,
-      "Unable to generate interview questions at the moment. Please try again."
-    )
+    questionsAndAnswers = buildFallbackQuestions({
+      jobRole,
+      jobDescription,
+      jobExperience,
+      noOfQuestions,
+      difficulty,
+    })
   }
 
   // *Create interview
